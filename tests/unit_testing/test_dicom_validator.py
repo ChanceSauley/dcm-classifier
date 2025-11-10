@@ -1,5 +1,6 @@
 from dcm_classifier.dicom_validator import DicomValidatorBase
 from dcm_classifier.dicom_volume import DicomSingleVolumeInfoBase
+from dcm_classifier.utility_functions import SanitizerInvalidConstants
 from pathlib import Path
 
 
@@ -45,4 +46,4 @@ def test_write_validation_report_append(mock_volumes, capsys):
     validator.write_validation_report(None)
     captured = capsys.readouterr()
     print(captured.out)
-    assert "testing" in captured.out and "Identified bvalue: -12345" in captured.out
+    assert "testing" in captured.out and f"Identified bvalue: {SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE}" in captured.out

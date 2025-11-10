@@ -26,6 +26,7 @@ from .image_type_inference import ImageTypeClassifierBase
 from .utility_functions import (
     check_two_images_have_same_physical_space,
     parse_acquisition_datetime,
+    SanitizerInvalidConstants,
 )
 
 
@@ -438,7 +439,6 @@ class ProcessOneDicomStudyToVolumesMappingBase:
         if not subseries_filenames:
             return []
 
-        INVALID_NUMERICAL_VALUE = -12345
         file_info_dict = defaultdict(list)
 
         try:
@@ -468,9 +468,17 @@ class ProcessOneDicomStudyToVolumesMappingBase:
                     # Safe extraction of metadata with fallback values
                     acquisition_date_time = parse_acquisition_datetime(ds)
                     acquisition_number = int(
-                        ds.get("AcquisitionNumber", INVALID_NUMERICAL_VALUE)
+                        ds.get(
+                            "AcquisitionNumber",
+                            SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE,
+                        )
                     )
-                    inst_number = int(ds.get("InstanceNumber", INVALID_NUMERICAL_VALUE))
+                    inst_number = int(
+                        ds.get(
+                            "InstanceNumber",
+                            SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE,
+                        )
+                    )
 
                     file_info_dict[ipp_key].append(
                         {

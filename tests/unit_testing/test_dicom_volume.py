@@ -5,7 +5,7 @@ from dcm_classifier.dicom_volume import (
 )
 from collections import OrderedDict
 import pytest
-from dcm_classifier.utility_functions import FImageType
+from dcm_classifier.utility_functions import FImageType, SanitizerInvalidConstants
 from dcm_classifier.study_processing import ProcessOneDicomStudyToVolumesMappingBase
 from dcm_classifier.image_type_inference import ImageTypeClassifierBase
 from deprecation import DeprecatedWarning
@@ -43,7 +43,7 @@ def test_get_b_value(mock_volumes):
 
     # sad path for a volume that doesn't have a b-value
     b_value = DicomSingleVolumeInfoBase(mock_volumes[0]).get_volume_bvalue()
-    assert b_value == -12345
+    assert b_value == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
 def test_primary_volume_info(mock_volumes):
@@ -247,9 +247,9 @@ def test_dataset_value_set_to_none(get_data_dir):
         == "None"
     )
     assert (
-        series.get_volume_list()[0].get_volume_dictionary()["InversionTime"] == "-12345"
+        series.get_volume_list()[0].get_volume_dictionary()["InversionTime"] == str(SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE)
     )
-    assert series.get_volume_list()[0].get_volume_dictionary()["SAR"] == "-12345"
+    assert series.get_volume_list()[0].get_volume_dictionary()["SAR"] == str(SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE)
 
 
 def test_t1w_dcm_volume_modality(mock_volume_study):

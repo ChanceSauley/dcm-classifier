@@ -20,6 +20,7 @@ from .dicom_config import inference_features
 from .dicom_series import DicomSingleSeries
 from .utility_functions import (
     infer_diffusion_from_gradient,
+    SanitizerInvalidConstants,
 )
 from pathlib import Path
 import warnings
@@ -168,7 +169,7 @@ class ImageTypeClassifierBase:
             "ImageOrientationPatient_0",
             "ImageOrientationPatient_5",
         ]:
-            if field == "INVALID_VALUE":
+            if field == SanitizerInvalidConstants.INVALID_STRING_VALUE:
                 return "INVALID"
 
         if float(feature_dict["ImageOrientationPatient_5"]) <= 0.5:
@@ -406,7 +407,10 @@ class ImageTypeClassifierBase:
             ]
             unique_bvals = list(set(bvals))
             if len(unique_modalities) == 1:
-                if -12345 not in unique_bvals:
+                if (
+                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    not in unique_bvals
+                ):
                     self._update_diffusion_series_modality()
                 else:
                     self.series.set_series_modality(
@@ -422,7 +426,10 @@ class ImageTypeClassifierBase:
                 # TODO: get more data for testing
                 elif "tracew" in unique_modalities:
                     self.series.set_series_modality("tracew")
-                elif -12345 not in unique_bvals:
+                elif (
+                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    not in unique_bvals
+                ):
                     self._update_diffusion_series_modality()
                 else:
                     # if other scenarios are not met, we set the modality to the first volume's modality

@@ -16,6 +16,7 @@ from dcm_classifier.utility_functions import (
     get_coded_dictionary_elements,
     get_bvalue,
     validate_numerical_dataset_element,
+    SanitizerInvalidConstants,
 )
 from dcm_classifier.dicom_config import required_DICOM_fields, optional_DICOM_fields
 from pathlib import Path
@@ -154,7 +155,7 @@ def test_no_series_number():
     f = pydicom.dcmread(vol[0])
     ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
 
-    assert ds_dict["SeriesNumber"] == "INVALID_VALUE"
+    assert ds_dict["SeriesNumber"] == SanitizerInvalidConstants.INVALID_STRING_VALUE
 
 
 def test_no_echo_time():
@@ -167,7 +168,7 @@ def test_no_echo_time():
     f = pydicom.dcmread(vol[0])
     ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
 
-    assert ds_dict["EchoTime"] == -12345
+    assert ds_dict["EchoTime"] == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
 def test_no_pixel_bandwidth():
@@ -180,7 +181,7 @@ def test_no_pixel_bandwidth():
     f = pydicom.dcmread(vol[0])
     ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
 
-    assert ds_dict["PixelBandwidth"] == "INVALID_VALUE"
+    assert ds_dict["PixelBandwidth"] == SanitizerInvalidConstants.INVALID_STRING_VALUE
 
 
 def test_empty_bvalue():
@@ -193,7 +194,7 @@ def test_empty_bvalue():
     f = pydicom.dcmread(vol[0])
     bval = get_bvalue(f)
 
-    assert bval == -12345
+    assert bval == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
 def test_invalid_fields():
@@ -228,10 +229,10 @@ def test_invalid_fields():
 
     # assert the fields that are in the dataset are set to one of these invalid values
     invalid_fields = [
-        "INVALID_VALUE",
-        "-12345",
+        SanitizerInvalidConstants.INVALID_STRING_VALUE,
+        str(SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE),
         "Unknown",
-        "-12345.0",
+        str(float(SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE)),
         "None",
         "",
         "000000.00",
@@ -341,10 +342,10 @@ def test_validating_numerical_dataset():
     assert element == "1.0"
 
     element = validate_numerical_dataset_element("None")
-    assert element == -12345
+    assert element == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
     element = validate_numerical_dataset_element(None)
-    assert element == -12345
+    assert element == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
 def test_is_integer():
@@ -361,7 +362,7 @@ def test_conv_arr_to_index_val():
 
 
 def test_get_invalid_coded_dictionary():
-    test_dict = {"example_value": "INVALID_VALUE"}
+    test_dict = {"example_value": SanitizerInvalidConstants.INVALID_STRING_VALUE}
 
     assert get_coded_dictionary_elements(test_dict) == {}
 
