@@ -31,9 +31,10 @@ from .utility_functions import (
     itk_read_from_dicomfn_list,
     vprint,
     get_coded_dictionary_elements,
-    sanitize_dicom_dataset,
+    DICOMDatasetSanitizer,
     get_diffusion_gradient_direction,
     SanitizerInvalidConstants,
+    dicom_field_search,
 )
 from .dicom_config import (
     required_DICOM_fields,
@@ -348,6 +349,23 @@ class DicomSingleVolumeInfoBase:
         """
         return self._pydicom_info.get(field_name, f"UNKNOWN_{field_name}")
 
+    def get_nested_dicom_field_by_name(self, field_name) -> list[Any]:
+        """
+        Get the element f"{field_name}" from the reference DICOM file (i.e. the first file found).
+        This should be the same for all volumes and is picked from the first volume.
+
+        This function will go into all Sequence DICOM fields looking for a match.
+
+        The Keyword elements from https://github.com/pydicom/pydicom/blob/main/src/pydicom/_dicom_dict.py
+        can be queried as field_name in this function.
+
+        :return: A list containing values of all instances of the field..
+        :rtype: list[Any]
+        """
+        return dicom_field_search(
+            dataset=self._pydicom_info, tag_name=field_name, nested_lookup=True
+        )
+
     @deprecated(
         deprecated_in="0.9.6",
         details="Use generic `get_dicom_field_by_name(field_name='SeriesInstanceUID')` instead of `get_series_uid()`",
@@ -511,11 +529,12 @@ class DicomSingleVolumeInfoBase:
         :rtype: Tuple[str, dict]
         """
         # sanitize the DICOM dataset
-        sanitized_dicom_dict, valid = sanitize_dicom_dataset(
-            ro_dataset=self._pydicom_info,
+        sanitize_dataset = DICOMDatasetSanitizer(
+            dataset=self._pydicom_info,
             required_info_list=required_DICOM_fields,
             optional_info_list=optional_DICOM_fields,
         )
+        sanitized_dicom_dict, valid = sanitize_dataset.sanitize_dicom_dataset()
         # if the dataset is not valid, mark as INVALID and return an empty dictionary
         if not valid:
             self.set_volume_modality("INVALID")

@@ -374,347 +374,308 @@ def vprint(msg: str, verbose: bool = False) -> None:
         print(msg)
 
 
-def sanitize_dicom_dataset(
-    ro_dataset: pydicom.Dataset,
-    required_info_list: list[str],
-    optional_info_list: list[str],
-) -> tuple[dict, bool]:
+def dicom_field_search(
+    dataset: Dataset, tag_name: str, nested_lookup: bool = True
+) -> list[Any]:
     """
-    Validates the DICOM fields in the DICOM header to ensure all required fields are present.
+    Iteratively search through a DICOM dataset for all instances
+    of a tag matching a given keyword name.
 
-    :param ro_dataset: The input DICOM dataset.
-    :type ro_dataset: pydicom.Dataset
-    :param required_info_list: A list of required DICOM fields.
-    :type required_info_list: list[str]
-    :param optional_info_list: A list of optional DICOM fields.
-    :type optional_info_list: list[str]
+    Parameters
+    ----------
+    dataset : pydicom.Dataset
+        The DICOM dataset to search.
+    tag_name : str
+        The DICOM keyword name to look for (e.g. 'ImageOrientationPatient').
+    nested_lookup : bool
+        If True, search into DICOM field sequences for nested fields.
 
-    :return: A dictionary containing the sanitized DICOM fields and a boolean indicating whether the validation was successful.
-    :rtype: tuple[dict, bool]
-
-    :raises ValueError: Raises an exception if any required fields are missing.
-
+    Returns
+    -------
+    matches : list
+        A list of unique values found for the given tag_name.
     """
-    dataset_dictionary: dict[str, Any] = dict()
-    dataset = deepcopy(ro_dataset)  # DO NOT MODIFY THE INPUT DATASET!
-    dicom_filename: Path = dataset.filename
-    dataset_dictionary["FileName"]: str = dicom_filename
-    dataset = pydicom.Dataset(dataset)  # DO NOT MODIFY THE INPUT DATASET!
-    dataset.remove_private_tags()
+    matches = []
+    if not nested_lookup:
+        base_lookup = dataset.get(tag_name)
+        return matches if base_lookup is None else [base_lookup]
 
-    # check if all fields in the required_info_list are present in dataset dictionary.
-    # If fields are not present, or they are formatted incorrectly, add them with INVALID_VALUE
-    missing_fields = []
-    for field in required_info_list:
-        if field not in dataset:
-            # RepetitionTime and EchoTime might not be present in ADC images.
-            # Therefore, if they are missing, set them to -12345
-            if field == "RepetitionTime" or field == "EchoTime":
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-            else:
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-        elif field == "EchoTime" or field == "RepetitionTime":
-            if dataset[field].value is None or str(dataset[field].value) == "":
-                # ADC sequences may not have EchoTime
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-            elif not is_number(dataset[field].value):
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required {field} value {dicom_filename}")
-            else:
-                dataset_dictionary[field] = dataset[field].value
-        elif field == "SeriesNumber":
-            if not is_integer(dataset[field].value):
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required {field} value {dicom_filename}")
-            else:
-                dataset_dictionary[field] = dataset[field].value
-        elif field == "PixelBandwidth":
-            if not is_number(dataset[field].value):
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required {field} value {dicom_filename}")
-            else:
-                dataset_dictionary[field] = dataset[field].value
-        elif field == "SliceThickness":
-            if not is_number(dataset[field].value):
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required {field} value {dicom_filename}")
-            else:
-                dataset_dictionary[field] = dataset[field].value
-        elif field == "PixelSpacing":
-            try:
-                dataset_dictionary[field] = np.array(dataset[field].value)
-            except Exception as e:
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required {field} value {dicom_filename}:\n{e}")
-        else:
-            # check that the field is not empty or None
-            if dataset[field].value is None or str(dataset[field].value) == "":
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_STRING_VALUE
-                )
-                missing_fields.append(field)
-                vprint(f"Missing required field {dicom_filename}")
-            else:
-                dataset_dictionary[field] = dataset[field].value
+    stack = [(dataset, "")]
+    while stack:
+        current_ds, parent_path = stack.pop()
 
-    # set the default values for optional dicom fields
-    for field in optional_info_list:
-        dataset_dictionary[field] = (
-            SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE  # Every optional field will be set to the default -12345 and will be overriden if present and valid
-        )
+        for elem in current_ds:
+            name = elem.keyword or str(elem.tag)
+            elem_path = f"{parent_path}/{name}"
+
+            if elem.keyword == tag_name:
+                matches.append(elem.value)
+
+            if elem.VR == "SQ":
+                for i, item in enumerate(elem.value):
+                    stack.append((item, f"{elem_path}[{i}]"))
+
+    deduplicated_matches = []
+    for match in matches:
+        if match not in deduplicated_matches:
+            deduplicated_matches.append(match)
+
+    return deduplicated_matches
+
+
+class DICOMDatasetSanitizer:
+    """
+    Overall class for validation that DICOM file's contain sufficient data to be processed for inference.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        required_info_list: list[str],
+        optional_info_list: list[str] | None = None,
+    ):
+        """
+        :param dataset: The input DICOM dataset.
+        :type dataset: pydicom.Dataset
+        :param required_info_list: A list of required DICOM fields.
+        :type required_info_list: list[str]
+        :param optional_info_list: A list of optional DICOM fields.
+        :type optional_info_list: list[str]
+        """
+        self.dataset = dataset
+        self.required_info_list = required_info_list
+        self.optional_info_list = optional_info_list if optional_info_list else []
+
+        self.required_fields_validators = {
+            "EchoTime": self._validate_echo_or_repetition,
+            "RepetitionTime": self._validate_echo_or_repetition,
+            "SeriesNumber": self._validate_integer,
+            "PixelBandwidth": self._validate_numeric,
+            "SliceThickness": self._validate_numeric,
+            "PixelSpacing": self._validate_pixel_spacing,
+        }
+
+    @staticmethod
+    def _validate_numeric(value):
+        if not is_number(value):
+            return SanitizerInvalidConstants.INVALID_STRING_VALUE, True
+        return value, False
+
+    @staticmethod
+    def _validate_integer(value):
+        if not is_integer(value):
+            return SanitizerInvalidConstants.INVALID_STRING_VALUE, True
+        return value, False
+
+    @staticmethod
+    def _validate_string(value):
+        if value is None or value == "":
+            return SanitizerInvalidConstants.INVALID_STRING_VALUE, True
+        return value, False
+
+    @staticmethod
+    def _validate_pixel_spacing(value):
         try:
-            dataset_value = dataset[field].value
+            return np.array(value), False
         except Exception:
-            dataset_value = SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+            return SanitizerInvalidConstants.INVALID_STRING_VALUE, True
 
-        if field == "SAR":
-            if field not in dataset or not is_number(dataset_value):
-                # SAR is allowed to be empty or not a number because derived images often do not have SAR
-                # for example, ADC images are derived images that are computed, so there is not
-                # SAR impact on the patient for the derived image.
-                # SAR Calculated whole body Specific Absorption Rate in watts/kilogram.
-                # indicate that there is no SAR for the computed image
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "Manufacturer":
-            if field not in dataset or dataset_value is None:
-                # Manufacturer is not a required field, it can be unknown
-                _default_inferred_value = "UnknownManufacturer"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "ImageType":
-            if field not in dataset or dataset_value is None:
-                # ImageType is not a required field, it can be unknown
-                _default_inferred_value = "UnknownImageType"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "ContrastBolusAgent":
-            if field not in dataset or dataset_value is None:
-                # The contrast is required but is empty if unknown but also may not be in every dataset
-                dataset_dictionary[field] = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "EchoNumbers":
-            if field not in dataset:
-                # EchoNumber(s) is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "EchoTrainLength":
-            if field not in dataset:
-                # EchoTrainLength is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "ScanningSequence":
-            if field not in dataset or dataset_value is None:
-                # ScanningSequence is not a required field, it can be unknown
-                _default_inferred_value = "UnknownScanningSequence"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "SequenceVariant":
-            if field not in dataset or dataset_value is None:
-                # SequenceVariant is not a required field, it can be unknown
-                _default_inferred_value = "UnknownSequenceVariant"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "InPlanePhaseEncodingDirection":
-            if field not in dataset or dataset_value is None:
-                # InplanePhaseEncodingDirection is not a required field, it can be unknown
-                _default_inferred_value = "UnknownInplanePhaseEncodingDirection"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "dBdt":
-            if field not in dataset:
-                # dBdt is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "ImagingFrequency":
-            if field not in dataset:
-                # ImagingFrequency is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "MRAcquisitionType":
-            if field not in dataset or dataset_value is None:
-                # MRAcquisitionType is not a required field, it can be unknown
-                _default_inferred_value = "UnknownMRAcquisitionType"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "NumberOfAverages":
-            if field not in dataset:
-                # NumberOfAverages is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "InversionTime":
-            if field not in dataset:
-                # InversionTime is not a required field, it can be unknown
-                _default_inferred_value = (
-                    SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
-                )
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        elif field == "VariableFlipAngleFlag":
-            if field not in dataset or dataset_value is None:
-                # VariableFlipAngleFlag is not a required field, it can be unknown
-                _default_inferred_value = "UnknownVariableFlipAngleFlag"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = dataset_value
-        elif field == "AcquisitionTime":
-            if field not in dataset:
-                # AcquisitionTime is not a required field, it can be unknown
-                _default_inferred_value = "000000.00"
-                dataset_dictionary[field] = _default_inferred_value
-                vprint(
-                    f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
-                )
-            else:
-                dataset_dictionary[field] = validate_numerical_dataset_element(
-                    dataset_value
-                )
-        else:
-            if field not in dataset:
-                # field is not present, set to default value
-                dataset_dictionary[field] = f"Unknown{field}"
-            else:
-                # field is present, set to value
-                dataset_dictionary[field] = dataset_value
+    @staticmethod
+    def _validate_echo_or_repetition(value):
+        if value is None or value == "":
+            # ADC case
+            return SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE, True
+        if not is_number(value):
+            return SanitizerInvalidConstants.INVALID_STRING_VALUE, True
+        return value, False
 
-    # Warn the user if there are INVALID_VALUE fields
-    if len(missing_fields) > 0:
-        print(f"\n\n\n{missing_fields}\n\n\n")
-        warnings.warn(
-            f"\nWARNING: Required DICOM fields: {missing_fields} in {dicom_filename} are missing or have invalid values.\n"
+    def validate_required_fields(
+        self, dataset_dictionary: dict[str, Any], dataset: Dataset
+    ) -> list[str]:
+        dicom_filename = dataset_dictionary["FileName"]
+
+        # check if all fields in the required_info_list are present in dataset dictionary.
+        # If fields are not present, or they are formatted incorrectly, add them with "INVALID_VALUE"
+        missing_fields = []
+        for field in self.required_info_list:
+            # Default to invalid string validator
+            validator = self.required_fields_validators.get(
+                field, self._validate_string
+            )
+
+            field_search = dicom_field_search(dataset=dataset, tag_name=field)
+            if not field_search:
+                if field == "EchoTime" or field == "RepetitionTime":
+                    # RepetitionTime and EchoTime might not be present in ADC images.
+                    # Therefore, if they are missing, set them to -12345
+                    dataset_dictionary[field] = (
+                        SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    )
+                else:
+                    dataset_dictionary[field] = (
+                        SanitizerInvalidConstants.INVALID_STRING_VALUE
+                    )
+                    missing_fields.append(field)
+            else:
+                value, bad = validator(field_search[0])
+                dataset_dictionary[field] = value
+                if bad:
+                    missing_fields.append(field)
+                    vprint(f"Missing required {field} value {dicom_filename}")
+
+        return missing_fields
+
+    def validate_optional_fields(
+        self, dataset_dictionary: dict[str, Any], dataset: Dataset
+    ):
+        dicom_filename = dataset_dictionary["FileName"]
+        # set the default values for optional dicom fields
+        for field in self.optional_info_list:
+            dataset_dictionary[field] = (
+                SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                # Every optional field will be set to the default -12345 and will be overridden if present and valid
+            )
+            try:
+                dataset_value = dataset[field].value
+            except Exception:
+                dataset_value = SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+
+            if field == "SAR":
+                if field not in dataset or not is_number(dataset_value):
+                    # SAR is allowed to be empty or not a number because derived images often do not have SAR
+                    # for example, ADC images are derived images that are computed, so there is not
+                    # SAR impact on the patient for the derived image.
+                    # SAR Calculated whole body Specific Absorption Rate in watts/kilogram.
+                    # indicate that there is no SAR for the computed image
+                    _default_inferred_value = (
+                        SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    )
+                    dataset_dictionary[field] = _default_inferred_value
+                    vprint(
+                        f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
+                    )
+                else:
+                    dataset_dictionary[field] = self.validate_numerical_dataset_element(
+                        dataset_value
+                    )
+            elif field in [
+                "Manufacturer",
+                "ImageType",
+                "ScanningSequence",
+                "SequenceVariant",
+                "InPlanePhaseEncodingDirection",
+                "MRAcquisitionType",
+                "VariableFlipAngleFlag",
+            ]:
+                if field not in dataset or dataset_value is None:
+                    # These tags are not a required field, they can be unknown
+                    _default_inferred_value = f"Unknown{field}"
+                    dataset_dictionary[field] = _default_inferred_value
+                    vprint(
+                        f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
+                    )
+                else:
+                    dataset_dictionary[field] = dataset_value
+            elif field == "ContrastBolusAgent":
+                if field not in dataset or dataset_value is None:
+                    # The contrast is required but is empty if unknown but also may not be in every dataset
+                    dataset_dictionary[field] = (
+                        SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    )
+                else:
+                    dataset_dictionary[field] = dataset_value
+            elif field in [
+                "EchoNumbers",
+                "EchoTrainLength",
+                "dBdt",
+                "ImagingFrequency",
+                "NumberOfAverages",
+                "InversionTime",
+            ]:
+                if field not in dataset:
+                    # These numerical tags are not a required field, they can be unknown
+                    _default_inferred_value = (
+                        SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+                    )
+                    dataset_dictionary[field] = _default_inferred_value
+                    vprint(
+                        f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
+                    )
+                else:
+                    dataset_dictionary[field] = self.validate_numerical_dataset_element(
+                        dataset_value
+                    )
+            elif field == "AcquisitionTime":
+                if field not in dataset:
+                    # AcquisitionTime is not a required field, it can be unknown
+                    _default_inferred_value = "000000.00"
+                    dataset_dictionary[field] = _default_inferred_value
+                    vprint(
+                        f"Inferring optional {field} value of '{_default_inferred_value}' for missing field in {dicom_filename}"
+                    )
+                else:
+                    dataset_dictionary[field] = self.validate_numerical_dataset_element(
+                        dataset_value
+                    )
+            else:
+                if field not in dataset:
+                    # field is not present, set to default value
+                    dataset_dictionary[field] = f"Unknown{field}"
+                else:
+                    # field is present, set to value
+                    dataset_dictionary[field] = dataset_value
+
+    def sanitize_dicom_dataset(self) -> tuple[dict, bool]:
+        """
+        Validates the DICOM fields in the DICOM header to ensure all required fields are present.
+
+        :return: A dictionary containing the sanitized DICOM fields and a boolean indicating whether the validation was successful.
+        :rtype: tuple[dict, bool]
+
+        :raises ValueError: Raises an exception if any required fields are missing.
+
+        """
+        dataset_dictionary: dict[str, Any] = {}
+        dataset = deepcopy(self.dataset)  # DO NOT MODIFY THE INPUT DATASET!
+        dicom_filename: Path = dataset.filename
+        dataset_dictionary["FileName"]: str = dicom_filename
+        dataset = pydicom.Dataset(dataset)  # DO NOT MODIFY THE INPUT DATASET!
+        dataset.remove_private_tags()
+
+        missing_fields = self.validate_required_fields(
+            dataset_dictionary=dataset_dictionary, dataset=dataset
         )
-        return dataset_dictionary, False
 
-    return dataset_dictionary, True
+        self.validate_optional_fields(
+            dataset_dictionary=dataset_dictionary, dataset=dataset
+        )
 
+        # Warn the user if there are INVALID_VALUE fields
+        if len(missing_fields) > 0:
+            print(f"\n\n\n{missing_fields}\n\n\n")
+            warnings.warn(
+                f"\nWARNING: Required DICOM fields: {missing_fields} in {dicom_filename} are missing or have invalid values.\n"
+            )
+            return dataset_dictionary, False
 
-def validate_numerical_dataset_element(element: str | None) -> str | float:
-    """
-    Function to validate element can be converted to a float
+        return dataset_dictionary, True
 
-    :param element: The element to validate.
-    :type element: str
+    @staticmethod
+    def validate_numerical_dataset_element(element: str | None) -> str | float:
+        """
+        Function to validate element can be converted to a float
 
-    :return: The element as a float if it can be converted, otherwise the element as a string.
-    :rtype: str | float
-    """
-    try:
-        float(element)
-        return element
-    except Exception:
-        return SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
+        :param element: The element to validate.
+        :type element: str
+
+        :return: The element as a float if it can be converted, otherwise the element as a string.
+        :rtype: str | float
+        """
+        try:
+            float(element)
+            return element
+        except Exception:
+            return SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
 # organize required features

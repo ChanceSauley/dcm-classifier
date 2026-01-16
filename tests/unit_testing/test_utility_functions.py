@@ -1,6 +1,8 @@
 import numpy as np
 import pydicom
 import pytest
+from pydicom.dataset import Dataset
+from pydicom.sequence import Sequence
 from dcm_classifier.example_image_processing import slugify, rglob_for_singular_result
 from dcm_classifier.image_type_inference import ImageTypeClassifierBase
 from dcm_classifier.study_processing import ProcessOneDicomStudyToVolumesMappingBase
@@ -8,15 +10,15 @@ from dcm_classifier.utility_functions import (
     vprint,
     get_diffusion_gradient_direction,
     convert_array_to_min_max,
-    sanitize_dicom_dataset,
+    DICOMDatasetSanitizer,
     itk_read_from_dicomfn_list,
     is_integer,
     ensure_magnitude_of_1,
     convert_array_to_index_value,
     get_coded_dictionary_elements,
     get_bvalue,
-    validate_numerical_dataset_element,
     SanitizerInvalidConstants,
+    dicom_field_search,
 )
 from dcm_classifier.dicom_config import required_DICOM_fields, optional_DICOM_fields
 from pathlib import Path
@@ -141,7 +143,12 @@ def test_unknown_in_image_type():
             vol.append(file)
 
     f = pydicom.dcmread(vol[0])
-    ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
+    sanitizer = DICOMDatasetSanitizer(
+        dataset=f,
+        required_info_list=required_DICOM_fields,
+        optional_info_list=optional_DICOM_fields,
+    )
+    ds_dict = sanitizer.sanitize_dicom_dataset()[0]
     assert ds_dict["ImageType"] == "UnknownImageType"
 
 
@@ -153,7 +160,12 @@ def test_no_series_number():
             vol.append(file)
 
     f = pydicom.dcmread(vol[0])
-    ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
+    sanitizer = DICOMDatasetSanitizer(
+        dataset=f,
+        required_info_list=required_DICOM_fields,
+        optional_info_list=optional_DICOM_fields,
+    )
+    ds_dict = sanitizer.sanitize_dicom_dataset()[0]
 
     assert ds_dict["SeriesNumber"] == SanitizerInvalidConstants.INVALID_STRING_VALUE
 
@@ -166,7 +178,12 @@ def test_no_echo_time():
             vol.append(file)
 
     f = pydicom.dcmread(vol[0])
-    ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
+    sanitizer = DICOMDatasetSanitizer(
+        dataset=f,
+        required_info_list=required_DICOM_fields,
+        optional_info_list=optional_DICOM_fields,
+    )
+    ds_dict = sanitizer.sanitize_dicom_dataset()[0]
 
     assert ds_dict["EchoTime"] == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
@@ -179,7 +196,12 @@ def test_no_pixel_bandwidth():
             vol.append(file)
 
     f = pydicom.dcmread(vol[0])
-    ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
+    sanitizer = DICOMDatasetSanitizer(
+        dataset=f,
+        required_info_list=required_DICOM_fields,
+        optional_info_list=optional_DICOM_fields,
+    )
+    ds_dict = sanitizer.sanitize_dicom_dataset()[0]
 
     assert ds_dict["PixelBandwidth"] == SanitizerInvalidConstants.INVALID_STRING_VALUE
 
@@ -207,7 +229,12 @@ def test_invalid_fields():
             vol.append(file)
 
     f = pydicom.dcmread(vol[0])
-    ds_dict = sanitize_dicom_dataset(f, required_DICOM_fields, optional_DICOM_fields)[0]
+    sanitizer = DICOMDatasetSanitizer(
+        dataset=f,
+        required_info_list=required_DICOM_fields,
+        optional_info_list=optional_DICOM_fields,
+    )
+    ds_dict = sanitizer.sanitize_dicom_dataset()[0]
 
     # Convert all values to strings
     ds_dict = {str(field): str(value) for field, value in ds_dict.items()}
@@ -338,13 +365,13 @@ def test_get_gradient_direction(get_data_dir):
 
 
 def test_validating_numerical_dataset():
-    element = validate_numerical_dataset_element("1.0")
+    element = DICOMDatasetSanitizer.validate_numerical_dataset_element("1.0")
     assert element == "1.0"
 
-    element = validate_numerical_dataset_element("None")
+    element = DICOMDatasetSanitizer.validate_numerical_dataset_element("None")
     assert element == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
-    element = validate_numerical_dataset_element(None)
+    element = DICOMDatasetSanitizer.validate_numerical_dataset_element(None)
     assert element == SanitizerInvalidConstants.INVALID_NUMERICAL_VALUE
 
 
@@ -371,3 +398,101 @@ def test_get_EADC_image_type():
     test_dict = {"ImageType": ["ORIGINAL", "PRIMARY", "EADC", "NONE"]}
 
     assert get_coded_dictionary_elements(test_dict)["ImageType_EADC"] == 1
+
+
+@pytest.fixture
+def simple_dataset():
+    """Creates a flat DICOM dataset."""
+    ds = Dataset()
+    ds.PatientName = "Test^Patient"
+    ds.PatientID = "12345"
+    return ds
+
+
+@pytest.fixture
+def nested_dataset():
+    """
+    Creates a valid multiframe dicom example dataset.
+    PerFrameFunctionalGroupsSequence docs:
+        https://dicom.innolitics.com/ciods/mr-spectroscopy/mr-spectroscopy-multi-frame-functional-groups/52009230
+    """
+    ds = Dataset()
+    ds.PatientName = "RootName"
+    ds.Modality = "MR"
+
+    # Create a Sequence item 1
+    plane_orientation_item1 = Dataset()
+    plane_orientation_item1.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+
+    perframe_item1 = Dataset()
+    perframe_item1.PlaneOrientationSequence = Sequence([plane_orientation_item1])
+
+    # Create a Sequence item 2
+    plane_orientation_item2 = Dataset()
+    plane_orientation_item2.ImageOrientationPatient = [0, 1, 0, 0, 0, -1]
+
+    perframe_item2 = Dataset()
+    perframe_item2.PlaneOrientationSequence = Sequence([plane_orientation_item2])
+
+    # Create a Sequence item 3
+    # This is the same as item 2 and exists to ensure of deduplication on retrieval
+    plane_orientation_item3 = Dataset()
+    plane_orientation_item3.ImageOrientationPatient = [0, 1, 0, 0, 0, -1]
+
+    perframe_item3 = Dataset()
+    perframe_item3.PlaneOrientationSequence = Sequence([plane_orientation_item3])
+
+    # Create the Sequence
+    ds.PerFrameFunctionalGroupsSequence = Sequence(
+        [perframe_item1, perframe_item2, perframe_item3]
+    )
+
+    return ds
+
+
+def test_dicom_field_search_root_tag(simple_dataset):
+    """It should find a tag located at the top level of the dataset."""
+    results = dicom_field_search(simple_dataset, "PatientName", nested_lookup=False)
+    assert len(results) == 1
+    assert results[0] == "Test^Patient"
+
+    results = dicom_field_search(simple_dataset, "PatientName", nested_lookup=True)
+    assert len(results) == 1
+    assert results[0] == "Test^Patient"
+
+
+def test_dicom_field_search_missing_tag(simple_dataset):
+    """It should return an empty list if the tag does not exist."""
+    results = dicom_field_search(simple_dataset, "StudyDate")
+    assert results == []
+
+
+def test_dicom_field_search_nested(nested_dataset):
+    """It should find tags nested inside a Sequence."""
+    raw_sequence_length = nested_dataset.get("PerFrameFunctionalGroupsSequence")
+    assert len(raw_sequence_length) == 3
+
+    results = dicom_field_search(nested_dataset, "ImageOrientationPatient")
+
+    # Should only be two results do to deduplication
+    assert len(results) == 2
+    assert [1, 0, 0, 0, 1, 0] in results
+    assert [0, 1, 0, 0, 0, -1] in results
+
+
+def test_dicom_field_search_nested_false(nested_dataset):
+    """It should NOT search inside sequences if multiframe_lookup is False."""
+    # CodeValue only exists inside the sequence, not at the root
+    results = dicom_field_search(
+        nested_dataset, "ImageOrientationPatient", nested_lookup=False
+    )
+    assert results == []
+
+
+def test_dicom_field_search_empty_sequence():
+    """It should handle empty sequences without crashing."""
+    ds = Dataset()
+    ds.ReferencedImageSequence = Sequence([])
+
+    results = dicom_field_search(ds, "ReferencedSOPInstanceUID")
+    assert results == []

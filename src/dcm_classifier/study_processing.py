@@ -27,6 +27,7 @@ from .utility_functions import (
     check_two_images_have_same_physical_space,
     parse_acquisition_datetime,
     SanitizerInvalidConstants,
+    dicom_field_search,
 )
 
 
@@ -447,8 +448,11 @@ class ProcessOneDicomStudyToVolumesMappingBase:
                     ds = pydicom.dcmread(dcm_file, stop_before_pixels=True)
 
                     # Validate ImagePositionPatient
-                    img_position = ds.get("ImagePositionPatient")
-                    if img_position is None:
+                    all_img_position: list[list[float | int]] = dicom_field_search(
+                        dataset=ds, tag_name="ImagePositionPatient", nested_lookup=True
+                    )
+
+                    if len(all_img_position) == 0:
                         if self.raise_error_on_failure:
                             raise ValueError(
                                 f"ImagePositionPatient not found in {dcm_file}"
@@ -462,7 +466,10 @@ class ProcessOneDicomStudyToVolumesMappingBase:
                                 0,
                                 len(file_info_dict),
                             ]  # Create synthetic position
+                    else:
+                        img_position = all_img_position[0]
 
+                    print("\n\nCHANCE - FINAL WORKING\n\n")
                     ipp_key = tuple(img_position)
 
                     # Safe extraction of metadata with fallback values
