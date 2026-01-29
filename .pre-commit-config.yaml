@@ -13,6 +13,7 @@ repos:
         args: ['--pytest-test-first']
       - id: trailing-whitespace
       - id: check-added-large-files
+        exclude: ^uv\.lock$
       - id: requirements-txt-fixer
       - id: check-ast
 
